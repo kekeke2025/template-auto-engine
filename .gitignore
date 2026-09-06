@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+# package-lock.json / yarn.lock 保留，用于锁定依赖版本
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+
+# Build outputs
+dist/
+build/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Uploads (user-generated content, large binary files)
+backend/uploads/
+
+# Test scripts and debug files at backend root
+backend/test-*.js
+backend/test-*.png
+backend/test-*.log
+backend/check-*.js
+backend/calibrate.js
+backend/find-scale.js
+backend/measure-psd.js
+backend/test_batch.zip
+backend/test-output.png
+backend/test-direct-svg.png
+backend/test-small-text.png
+backend/test-small-text-cropped.png
+backend/test-white-on-white.png
+backend/test-big-red.png
+
+# Snapshots
+.snapshots/

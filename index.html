@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频播放</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #121212;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .video-container {
+            position: relative;
+            max-width: 90vw;
+            max-height: 90vh;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .controls {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            padding: 20px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .video-container:hover .controls,
+        .video-container.paused .controls {
+            opacity: 1;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 3px;
+            cursor: pointer;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #3b82f6;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+        .control-buttons {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: white;
+        }
+        .btn {
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            padding: 8px 12px;
+            border-radius: 6px;
+            transition: background 0.2s ease, transform 0.1s ease;
+            font-size: 16px;
+        }
+        .btn:hover {
+            background: rgba(255,255,255,0.1);
+            transform: scale(1.05);
+        }
+        .btn:active {
+            transform: scale(0.95);
+        }
+        .left-controls, .right-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .time {
+            font-size: 14px;
+            color: rgba(255,255,255,0.8);
+        }
+        .volume-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .volume-slider {
+            width: 80px;
+            height: 4px;
+            cursor: pointer;
+        }
+        select {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        select option {
+            background: #1e1e1e;
+        }
+    </style>
+</head>
+<body>
+    <div class="video-container" id="videoContainer">
+        <video id="videoPlayer" playsinline>
+            <source src="./video/your-video.mp4" type="video/mp4">
+            您的浏览器不支持视频播放。
+        </video>
+        
+        <div class="controls">
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            
+            <div class="control-buttons">
+                <div class="left-controls">
+                    <button class="btn" id="playPauseBtn">▶️ 播放</button>
+                    <span class="time" id="timeDisplay">0:00 / 0:00</span>
+                </div>
+                
+                <div class="right-controls">
+                    <div class="volume-control">
+                        <button class="btn" id="volumeBtn">🔊</button>
+                        <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.1" value="1">
+                    </div>
+                    
+                    <select id="speedSelect">
+                        <option value="0.5">0.5x</option>
+                        <option value="0.75">0.75x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.25">1.25x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                    </select>
+                    
+                    <button class="btn" id="fullscreenBtn">⛶ 全屏</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('videoPlayer');
+        const videoContainer = document.getElementById('videoContainer');
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const volumeBtn = document.getElementById('volumeBtn');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const speedSelect = document.getElementById('speedSelect');
+        const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+        // 播放/暂停
+        playPauseBtn.addEventListener('click', togglePlayPause);
+        video.addEventListener('click', togglePlayPause);
+
+        function togglePlayPause() {
+            if (video.paused) {
+                video.play();
+                playPauseBtn.textContent = '⏸️ 暂停';
+                videoContainer.classList.remove('paused');
+            } else {
+                video.pause();
+                playPauseBtn.textContent = '▶️ 播放';
+                videoContainer.classList.add('paused');
+            }
+        }
+
+        // 进度条更新
+        video.addEventListener('timeupdate', updateProgress);
+
+        function updateProgress() {
+            const progress = (video.currentTime / video.duration) * 100;
+            progressFill.style.width = `${progress}%`;
+            
+            const currentTime = formatTime(video.currentTime);
+            const duration = formatTime(video.duration);
+            timeDisplay.textContent = `${currentTime} / ${duration}`;
+        }
+
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // 点击进度条跳转
+        progressBar.addEventListener('click', (e) => {
+            const rect = progressBar.getBoundingClientRect();
+            const pos = (e.clientX - rect.left) / rect.width;
+            video.currentTime = pos * video.duration;
+        });
+
+        // 音量控制
+        volumeBtn.addEventListener('click', toggleMute);
+        volumeSlider.addEventListener('input', updateVolume);
+
+        function toggleMute() {
+            video.muted = !video.muted;
+            volumeBtn.textContent = video.muted ? '🔇' : '🔊';
+            volumeSlider.value = video.muted ? 0 : 1;
+        }
+
+        function updateVolume() {
+            video.volume = volumeSlider.value;
+            if (video.volume === 0) {
+                volumeBtn.textContent = '🔇';
+            } else if (video.volume < 0.5) {
+                volumeBtn.textContent = '🔉';
+            } else {
+                volumeBtn.textContent = '🔊';
+            }
+        }
+
+        // 播放速度
+        speedSelect.addEventListener('change', () => {
+            video.playbackRate = parseFloat(speedSelect.value);
+        });
+
+        // 全屏
+        fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                videoContainer.requestFullscreen().catch(err => {
+                    alert(`全屏错误: ${err.message}`);
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        // 视频加载完成后自动设置时长
+        video.addEventListener('loadedmetadata', () => {
+            timeDisplay.textContent = `0:00 / ${formatTime(video.duration)}`;
+        });
+
+        // 视频结束后重置状态
+        video.addEventListener('ended', () => {
+            playPauseBtn.textContent = '▶️ 播放';
+            videoContainer.classList.add('paused');
+        });
+    </script>
+</body>
+</html>

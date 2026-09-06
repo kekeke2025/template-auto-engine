@@ -1,0 +1,39 @@
+.main-layout {
+  height: 100vh;
+}
+
+.logo {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.logo h2 {
+  color: #fff;
+  font-size: 18px;
+  margin: 0;
+}
+
+.header {
+  background: #fff;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+}
+
+.content {
+  margin: 24px;
+  background: #fff;
+  border-radius: 8px;
+  padding: 24px;
+  overflow: auto;
+}

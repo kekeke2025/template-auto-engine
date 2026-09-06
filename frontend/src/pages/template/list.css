@@ -1,0 +1,20 @@
+.template-list {
+  height: 100%;
+}
+
+.list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.list-header h1 {
+  font-size: 24px;
+  margin: 0;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+}

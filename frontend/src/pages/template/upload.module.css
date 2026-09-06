@@ -1,0 +1,56 @@
+.template-upload-page {
+  padding: 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  margin: 0 0 0 16px;
+  font-size: 24px;
+}
+
+.upload-card :global(.ant-card-body),
+.info-card :global(.ant-card-body),
+.layers-card :global(.ant-card-body),
+.sizes-card :global(.ant-card-body) {
+  padding: 24px;
+}
+
+.loading-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 20px;
+  gap: 12px;
+}
+
+.empty-tip {
+  text-align: center;
+  padding: 40px 0;
+  color: #999;
+}
+
+.layer-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.layer-name {
+  font-size: 14px;
+}
+
+.size-form {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.submit-section {
+  text-align: right;
+}
