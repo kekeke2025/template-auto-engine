@@ -393,12 +393,59 @@ export class ImageRenderService {
           .toBuffer();
       }
 
+      // 计算实际合成位置和裁剪（sharp 不支持负坐标，也不允许合成图大于底图）
+      const baseMeta = await sharp(baseBuffer).metadata();
+      const baseW = baseMeta.width || 0;
+      const baseH = baseMeta.height || 0;
+
+      let srcLeft = 0;
+      let srcTop = 0;
+      let destLeft = Math.round(layer.x);
+      let destTop = Math.round(layer.y);
+      let cropW = layer.width;
+      let cropH = layer.height;
+
+      // 处理左边越界
+      if (destLeft < 0) {
+        srcLeft = -destLeft;
+        cropW += destLeft; // destLeft 是负数，所以相当于减少
+        destLeft = 0;
+      }
+      // 处理上边越界
+      if (destTop < 0) {
+        srcTop = -destTop;
+        cropH += destTop;
+        destTop = 0;
+      }
+      // 处理右边越界
+      if (destLeft + cropW > baseW) {
+        cropW = baseW - destLeft;
+      }
+      // 处理下边越界
+      if (destTop + cropH > baseH) {
+        cropH = baseH - destTop;
+      }
+
+      // 如果完全在画布外，跳过
+      if (cropW <= 0 || cropH <= 0) {
+        return baseBuffer;
+      }
+
+      // 裁剪到画布范围内
+      let composableImage = finalImage;
+      if (srcLeft > 0 || srcTop > 0 || cropW < layer.width || cropH < layer.height) {
+        composableImage = await sharp(finalImage)
+          .extract({ left: srcLeft, top: srcTop, width: cropW, height: cropH })
+          .png()
+          .toBuffer();
+      }
+
       // 合成到基础图
       return sharp(baseBuffer)
         .composite([{
-          input: finalImage,
-          left: Math.round(layer.x),
-          top: Math.round(layer.y),
+          input: composableImage,
+          left: destLeft,
+          top: destTop,
         }])
         .png()
         .toBuffer();

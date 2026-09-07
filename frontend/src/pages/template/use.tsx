@@ -98,6 +98,10 @@ export default function TemplateUse() {
   const [template, setTemplate] = useState<Template | null>(null)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
+  // 图片层上传结果独立管理（key为图层匹配名或layerId，value为图片url）
+  const [imageValues, setImageValues] = useState<Record<string, string>>({})
+  // 图片层的 fileList（用于 Upload 组件受控显示）
+  const [imageFileLists, setImageFileLists] = useState<Record<string, any[]>>({})
   const [generatedImages, setGeneratedImages] = useState<GeneratedImage[]>([])
   const [zipUrl, setZipUrl] = useState('')
   const [selectedSizes, setSelectedSizes] = useState<string[]>([])
@@ -166,11 +170,28 @@ export default function TemplateUse() {
 
       // 初始化表单默认值（表单的 key 是图层匹配名（多尺寸模式）或 layerId（旧模式））
       const formValues: Record<string, any> = {}
+      const initImageValues: Record<string, string> = {}
+      const initImageFileLists: Record<string, any[]> = {}
       editable.forEach((layer: Layer) => {
         const key = hasVariants ? getLayerMatchName(layer) : layer.id
-        formValues[key] = layer.textContent || layer.imageUrl || ''
+        if (layer.type === 'text') {
+          formValues[key] = layer.textContent || ''
+        } else {
+          const url = layer.imageUrl || ''
+          initImageValues[key] = url
+          if (url) {
+            initImageFileLists[key] = [{
+              uid: key,
+              name: layer.name,
+              status: 'done',
+              url: url,
+            }]
+          }
+        }
       })
       form.setFieldsValue(formValues)
+      setImageValues(initImageValues)
+      setImageFileLists(initImageFileLists)
     } catch (e) {
       message.error('加载模板详情失败')
     } finally {
@@ -199,9 +220,9 @@ export default function TemplateUse() {
 
       editableLayers.forEach((layer: Layer) => {
         const key = hasSizeVariants ? getLayerMatchName(layer) : layer.id
-        const value = values[key]
 
         if (layer.type === 'text') {
+          const value = values[key]
           const originalText = layer.textContent || ''
           const currentText = value || ''
           if (originalText !== currentText) {
@@ -221,7 +242,11 @@ export default function TemplateUse() {
             }
           }
         } else {
-          replaceData[key] = { type: 'image', url: value }
+          // 图片层：从独立的 imageValues state 取值
+          const imgUrl = imageValues[key]
+          if (imgUrl) {
+            replaceData[key] = { type: 'image', url: imgUrl }
+          }
         }
       })
 
@@ -249,7 +274,7 @@ export default function TemplateUse() {
     }
   }
 
-  const handleCustomImageUpload = async (options: any) => {
+  const handleCustomImageUpload = (layerKey: string) => async (options: any) => {
     const { file, onSuccess, onError } = options
     try {
       const formData = new FormData()
@@ -257,6 +282,19 @@ export default function TemplateUse() {
       const res: any = await request.post('/template/upload/image', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
+      const url = getImageUrl(res.url)
+      setImageValues(prev => ({ ...prev, [layerKey]: url }))
+      // 更新 fileList 以便显示缩略图
+      setImageFileLists(prev => ({
+        ...prev,
+        [layerKey]: [{
+          uid: layerKey,
+          name: file.name,
+          status: 'done',
+          url: url,
+          response: res,
+        }]
+      }))
       onSuccess(res)
     } catch (e) {
       onError(e)
@@ -407,38 +445,44 @@ export default function TemplateUse() {
             <Form form={form} layout="vertical">
               {editableLayers.map(layer => {
                 const fieldKey = hasSizeVariants ? getLayerMatchName(layer) : layer.id
-                return (
-                  <Form.Item
-                    key={fieldKey}
-                    name={fieldKey}
-                    label={layer.name}
-                    rules={layer.type === 'text' ? [{ required: true, message: `请填写${layer.name}` }] : []}
-                    getValueFromEvent={(e: any) => {
-                      if (e?.fileList) {
-                        const file = e.fileList[0]
-                        if (file?.response?.url) {
-                          return getImageUrl(file.response.url)
-                        }
-                        return file?.url || ''
-                      }
-                      return e?.target?.value
-                    }}
-                  >
-                    {layer.type === 'text' ? (
+                if (layer.type === 'text') {
+                  return (
+                    <Form.Item
+                      key={fieldKey}
+                      name={fieldKey}
+                      label={layer.name}
+                      rules={[{ required: true, message: `请填写${layer.name}` }]}
+                    >
                       <Input.TextArea
                         placeholder={`请输入${layer.name}`}
                         rows={2}
                       />
-                    ) : (
-                      <Upload
-                        customRequest={handleCustomImageUpload}
-                        listType="picture"
-                        maxCount={1}
-                        showUploadList={{ showPreviewIcon: false }}
-                      >
-                        <Button icon={<UploadOutlined />}>点击上传图片</Button>
-                      </Upload>
-                    )}
+                    </Form.Item>
+                  )
+                }
+                // 图片层：独立状态管理，不绑定 Form
+                return (
+                  <Form.Item key={fieldKey} label={layer.name}>
+                    <Upload
+                      customRequest={handleCustomImageUpload(fieldKey)}
+                      listType="picture"
+                      maxCount={1}
+                      fileList={imageFileLists[fieldKey] || []}
+                      showUploadList={{ showPreviewIcon: false }}
+                      onChange={({ fileList: newList }) => {
+                        if (newList.length === 0) {
+                          // 被删除了
+                          setImageValues(prev => {
+                            const next = { ...prev }
+                            delete next[fieldKey]
+                            return next
+                          })
+                        }
+                        setImageFileLists(prev => ({ ...prev, [fieldKey]: newList }))
+                      }}
+                    >
+                      <Button icon={<UploadOutlined />}>点击上传图片</Button>
+                    </Upload>
                   </Form.Item>
                 )
               })}
@@ -453,7 +497,11 @@ export default function TemplateUse() {
                   >
                     生成图片{selectedSizes.length > 1 ? `（${selectedSizes.length}张）` : ''}
                   </Button>
-                  <Button size="large" onClick={() => form.resetFields()}>
+                  <Button size="large" onClick={() => {
+                    form.resetFields()
+                    setImageValues({})
+                    setImageFileLists({})
+                  }}>
                     重置内容
                   </Button>
                 </Space>
