@@ -5,6 +5,7 @@ import * as path from 'path';
 const sharp = require('sharp');
 import * as JSZip from 'jszip';
 import { FontMatcherService } from './font-matcher.service';
+import { LayerStyleService } from './layer-style.service';
 
 export interface RenderLayer {
   id: string;
@@ -16,6 +17,8 @@ export interface RenderLayer {
   width: number;
   height: number;
   opacity: number;
+  /** 混合模式（PS 层混合模式） */
+  blendMode?: string;
   textContent?: string;
   textStyle?: {
     fontFamily?: string;
@@ -28,8 +31,126 @@ export interface RenderLayer {
   };
   imageUrl?: string;
   children?: RenderLayer[];
+  /** 图层样式（effects） */
+  layerStyle?: LayerStyle;
   /** 内部标记：图层内容是否被替换（用于决定渲染方式） */
   _replaced?: boolean;
+}
+
+export interface LayerStyle {
+  /** 混合模式（从 layerStyle 单独提出来方便用） */
+  blendMode?: string;
+  /** 填充不透明度（0-1） */
+  fillOpacity?: number;
+  /** 投影 */
+  dropShadow?: Array<{
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    angle: number;
+    distance: number;
+    size: number;
+    spread: number;
+    useGlobalLight: boolean;
+  }>;
+  /** 内阴影 */
+  innerShadow?: Array<{
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    angle: number;
+    distance: number;
+    size: number;
+    choke: number;
+    useGlobalLight: boolean;
+  }>;
+  /** 外发光 */
+  outerGlow?: {
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    size: number;
+    spread: number;
+  };
+  /** 内发光 */
+  innerGlow?: {
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    size: number;
+    choke: number;
+    source: 'edge' | 'center';
+  };
+  /** 颜色叠加 */
+  colorOverlay?: Array<{
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+  }>;
+  /** 渐变叠加 */
+  gradientOverlay?: Array<{
+    enabled: boolean;
+    blendMode: string;
+    opacity: number;
+    angle: number;
+    scale: number;
+    style: 'linear' | 'radial' | 'angle' | 'reflected' | 'diamond';
+    gradientType: 'solid' | 'noise';
+    colorStops: Array<{ color: string; location: number; opacity: number }>;
+  }>;
+  /** 描边 */
+  stroke?: Array<{
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    size: number;
+    position: 'inside' | 'center' | 'outside';
+    fillType: 'color' | 'gradient' | 'pattern';
+  }>;
+  /** 斜面浮雕 */
+  bevel?: {
+    enabled: boolean;
+    style: string;
+    technique: string;
+    depth: number;
+    direction: string;
+    size: number;
+    soften: number;
+    angle: number;
+    useGlobalLight: boolean;
+    altitude: number;
+    highlightBlendMode: string;
+    shadowBlendMode: string;
+    highlightColor: string;
+    shadowColor: string;
+    highlightOpacity: number;
+    shadowOpacity: number;
+  };
+  /** 光泽 */
+  satin?: {
+    enabled: boolean;
+    blendMode: string;
+    color: string;
+    opacity: number;
+    angle: number;
+    distance: number;
+    size: number;
+    invert: boolean;
+  };
+  /** 图案叠加 */
+  patternOverlay?: {
+    enabled: boolean;
+    blendMode: string;
+    opacity: number;
+    scale: number;
+    patternName: string;
+  };
 }
 
 export interface RenderSize {
@@ -56,7 +177,10 @@ export interface RenderOptions {
 
 @Injectable()
 export class ImageRenderService {
-  constructor(private readonly fontMatcher: FontMatcherService) {}
+  constructor(
+    private readonly fontMatcher: FontMatcherService,
+    private readonly layerStyle: LayerStyleService,
+  ) {}
   /**
    * 单张渲染（原始尺寸）
    * @param layers 可编辑图层（只渲染需要替换的图层）
@@ -372,17 +496,35 @@ export class ImageRenderService {
       }
 
       // 调整图片尺寸到图层大小
-      const resizedImage = await sharp(imagePath)
+      let finalImage = await sharp(imagePath)
         .resize(layer.width, layer.height, { fit: 'cover' })
         .ensureAlpha()
         .png()
         .toBuffer();
 
-      // 应用透明度
+      // 应用图层样式（ag-psd 渲染的 canvas 不包含 effects，需要手动应用）
+      let styleOffsetX = 0;
+      let styleOffsetY = 0;
+      let styledWidth = layer.width;
+      let styledHeight = layer.height;
+      if (layer.layerStyle) {
+        const styleResult = await this.layerStyle.applyLayerStyles(
+          finalImage,
+          layer.layerStyle,
+          layer.width,
+          layer.height,
+        );
+        finalImage = styleResult.buffer;
+        styleOffsetX = styleResult.offsetX;
+        styleOffsetY = styleResult.offsetY;
+        styledWidth = styleResult.width;
+        styledHeight = styleResult.height;
+      }
+
+      // 应用透明度（图层级 opacity，样式已经有自己的透明度了，这里是整体透明度）
       const opacity = layer.opacity != null ? layer.opacity : 1;
-      let finalImage = resizedImage;
       if (opacity < 1) {
-        finalImage = await sharp(resizedImage)
+        finalImage = await sharp(finalImage)
           .composite([{
             input: Buffer.from([255, 255, 255, Math.round(opacity * 255)]),
             raw: { width: 1, height: 1, channels: 4 },
@@ -393,22 +535,35 @@ export class ImageRenderService {
           .toBuffer();
       }
 
+      // 获取混合模式
+      const blendMode = this.layerStyle.getSharpBlendMode(
+        layer.blendMode || layer.layerStyle?.blendMode
+      );
+
       // 计算实际合成位置和裁剪（sharp 不支持负坐标，也不允许合成图大于底图）
       const baseMeta = await sharp(baseBuffer).metadata();
       const baseW = baseMeta.width || 0;
       const baseH = baseMeta.height || 0;
 
+      // 样式应用后，图层的实际位置和大小可能变化（投影/外发光/外描边会扩展画布）
+      // styleOffsetX/styleOffsetY 是负的，表示新图相对原图向左/上偏移
+      const actualX = Math.round(layer.x + styleOffsetX);
+      const actualY = Math.round(layer.y + styleOffsetY);
+      const actualW = styledWidth;
+      const actualH = styledHeight;
+
+      // 先计算图层图片在画布中的可见区域
       let srcLeft = 0;
       let srcTop = 0;
-      let destLeft = Math.round(layer.x);
-      let destTop = Math.round(layer.y);
-      let cropW = layer.width;
-      let cropH = layer.height;
+      let destLeft = actualX;
+      let destTop = actualY;
+      let cropW = actualW;
+      let cropH = actualH;
 
       // 处理左边越界
       if (destLeft < 0) {
         srcLeft = -destLeft;
-        cropW += destLeft; // destLeft 是负数，所以相当于减少
+        cropW += destLeft;
         destLeft = 0;
       }
       // 处理上边越界
@@ -433,19 +588,20 @@ export class ImageRenderService {
 
       // 裁剪到画布范围内
       let composableImage = finalImage;
-      if (srcLeft > 0 || srcTop > 0 || cropW < layer.width || cropH < layer.height) {
+      if (srcLeft > 0 || srcTop > 0 || cropW < actualW || cropH < actualH) {
         composableImage = await sharp(finalImage)
           .extract({ left: srcLeft, top: srcTop, width: cropW, height: cropH })
           .png()
           .toBuffer();
       }
 
-      // 合成到基础图
+      // 合成到基础图（带混合模式）
       return sharp(baseBuffer)
         .composite([{
           input: composableImage,
           left: destLeft,
           top: destTop,
+          blend: blendMode,
         }])
         .png()
         .toBuffer();
@@ -599,30 +755,99 @@ export class ImageRenderService {
       const textPixelH = maxY - minY + 1;
 
       // 裁剪出文字的精确像素图
-      const croppedBuffer = await sharp(textBuffer)
+      let croppedBuffer = await sharp(textBuffer)
         .extract({ left: minX, top: minY, width: textPixelW, height: textPixelH })
         .png()
         .toBuffer();
 
-      // 计算合成位置：
-      // - 垂直：像素顶部对齐图层顶部（和 PSD ag-psd 的图层坐标系一致）
-      // - 水平：根据对齐方式定位
-      let compLeft = Math.round(layer.x);
-      const compTop = Math.round(layer.y); // 像素顶部 = 图层顶部
+      // 应用图层样式（文字层走 SVG 说明是被替换的，需要重新应用样式）
+      let finalW = textPixelW;
+      let finalH = textPixelH;
+      // 样式导致的偏移（applyLayerStyles 返回的 offsetX/offsetY 是负的，表示新图相对原图向左/上偏移）
+      let styleOffsetX = 0;
+      let styleOffsetY = 0;
 
-      if (textAlign === 'center') {
-        compLeft = Math.round(layer.x + (layer.width - textPixelW) / 2);
-      } else if (textAlign === 'right' || textAlign === 'end') {
-        compLeft = Math.round(layer.x + layer.width - textPixelW);
+      if (layer.layerStyle) {
+        const styleResult = await this.layerStyle.applyLayerStyles(
+          croppedBuffer,
+          layer.layerStyle,
+          textPixelW,
+          textPixelH,
+        );
+        croppedBuffer = styleResult.buffer;
+        styleOffsetX = styleResult.offsetX;
+        styleOffsetY = styleResult.offsetY;
+        finalW = styleResult.width;
+        finalH = styleResult.height;
       }
-      // left/start: 左对齐，compLeft = layer.x
 
-      // 合成文字（用精确裁剪后的文字图，直接放到正确位置）
+      // 计算合成位置：
+      // - 垂直：文字像素顶部对齐图层顶部（和 PSD ag-psd 的图层坐标系一致）
+      // - 水平：根据对齐方式定位
+      // 样式向外扩展了，所以位置要向左上偏移 styleOffsetX/styleOffsetY（负值）
+      let compLeft = Math.round(layer.x + styleOffsetX);
+      let compTop = Math.round(layer.y + styleOffsetY);
+
+      // 水平对齐调整（基于图层宽度，对齐的是文字内容本身，不含样式扩展）
+      if (textAlign === 'center') {
+        compLeft = Math.round(layer.x + (layer.width - textPixelW) / 2 + styleOffsetX);
+      } else if (textAlign === 'right' || textAlign === 'end') {
+        compLeft = Math.round(layer.x + layer.width - textPixelW + styleOffsetX);
+      }
+
+      // 获取混合模式
+      const blendMode = this.layerStyle.getSharpBlendMode(
+        layer.blendMode || layer.layerStyle?.blendMode
+      );
+
+      // 合成文字（先裁剪越界部分再合成）
+      const baseMeta = await sharp(baseBuffer).metadata();
+      const baseW = baseMeta.width || 0;
+      const baseH = baseMeta.height || 0;
+
+      let srcLeft = 0;
+      let srcTop = 0;
+      let destLeft = compLeft;
+      let destTop = compTop;
+      let cropW = finalW;
+      let cropH = finalH;
+
+      // 处理越界
+      if (destLeft < 0) {
+        srcLeft = -destLeft;
+        cropW += destLeft;
+        destLeft = 0;
+      }
+      if (destTop < 0) {
+        srcTop = -destTop;
+        cropH += destTop;
+        destTop = 0;
+      }
+      if (destLeft + cropW > baseW) {
+        cropW = baseW - destLeft;
+      }
+      if (destTop + cropH > baseH) {
+        cropH = baseH - destTop;
+      }
+
+      if (cropW <= 0 || cropH <= 0) {
+        return baseBuffer;
+      }
+
+      let composableText = croppedBuffer;
+      if (srcLeft > 0 || srcTop > 0 || cropW < finalW || cropH < finalH) {
+        composableText = await sharp(croppedBuffer)
+          .extract({ left: srcLeft, top: srcTop, width: cropW, height: cropH })
+          .png()
+          .toBuffer();
+      }
+
       return sharp(baseBuffer)
         .composite([{
-          input: croppedBuffer,
-          left: compLeft,
-          top: compTop,
+          input: composableText,
+          left: destLeft,
+          top: destTop,
+          blend: blendMode,
         }])
         .png()
         .toBuffer();
@@ -637,7 +862,7 @@ export class ImageRenderService {
    */
   private async compositeShapeLayer(baseBuffer: Buffer, layer: RenderLayer): Promise<Buffer> {
     try {
-      const shapeBuffer = await sharp({
+      let shapeBuffer = await sharp({
         create: {
           width: Math.max(1, Math.round(layer.width)),
           height: Math.max(1, Math.round(layer.height)),
@@ -646,11 +871,81 @@ export class ImageRenderService {
         },
       }).png().toBuffer();
 
+      // 应用图层样式
+      let styleOffsetX = 0;
+      let styleOffsetY = 0;
+      let styledWidth = layer.width;
+      let styledHeight = layer.height;
+      if (layer.layerStyle) {
+        const styleResult = await this.layerStyle.applyLayerStyles(
+          shapeBuffer,
+          layer.layerStyle,
+          layer.width,
+          layer.height,
+        );
+        shapeBuffer = styleResult.buffer;
+        styleOffsetX = styleResult.offsetX;
+        styleOffsetY = styleResult.offsetY;
+        styledWidth = styleResult.width;
+        styledHeight = styleResult.height;
+      }
+
+      // 应用图层透明度
+      const opacity = layer.opacity != null ? layer.opacity : 1;
+      if (opacity < 1) {
+        shapeBuffer = await sharp(shapeBuffer)
+          .composite([{
+            input: Buffer.from([255, 255, 255, Math.round(opacity * 255)]),
+            raw: { width: 1, height: 1, channels: 4 },
+            tile: true,
+            blend: 'dest-in',
+          }])
+          .png()
+          .toBuffer();
+      }
+
+      // 获取混合模式
+      const blendMode = this.layerStyle.getSharpBlendMode(
+        layer.blendMode || layer.layerStyle?.blendMode
+      );
+
+      // 实际合成位置（考虑样式扩展）
+      const actualX = Math.round(layer.x + styleOffsetX);
+      const actualY = Math.round(layer.y + styleOffsetY);
+
+      // 越界裁剪
+      const baseMeta = await sharp(baseBuffer).metadata();
+      const baseW = baseMeta.width || 0;
+      const baseH = baseMeta.height || 0;
+
+      let srcLeft = 0;
+      let srcTop = 0;
+      let destLeft = actualX;
+      let destTop = actualY;
+      let cropW = styledWidth;
+      let cropH = styledHeight;
+
+      if (destLeft < 0) { srcLeft = -destLeft; cropW += destLeft; destLeft = 0; }
+      if (destTop < 0) { srcTop = -destTop; cropH += destTop; destTop = 0; }
+      if (destLeft + cropW > baseW) { cropW = baseW - destLeft; }
+      if (destTop + cropH > baseH) { cropH = baseH - destTop; }
+
+      if (cropW <= 0 || cropH <= 0) return baseBuffer;
+
+      let composableImage = shapeBuffer;
+      if (srcLeft > 0 || srcTop > 0 || cropW < styledWidth || cropH < styledHeight) {
+        composableImage = await sharp(shapeBuffer)
+          .extract({ left: srcLeft, top: srcTop, width: cropW, height: cropH })
+          .png()
+          .toBuffer();
+      }
+
       return sharp(baseBuffer)
         .composite([{
-          input: shapeBuffer,
-          left: Math.round(layer.x),
-          top: Math.round(layer.y),
+          input: composableImage,
+          left: destLeft,
+          top: destTop,
+          blend: blendMode as any,
         }])
         .png()
         .toBuffer();

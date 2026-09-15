@@ -306,10 +306,13 @@ export default function TemplateUpload() {
           width: l.width,
           height: l.height,
           opacity: l.opacity,
+          blendMode: l.blendMode,
+          layerStyle: l.layerStyle,
           textContent: l.textContent,
           textStyle: l.textStyle,
           imageUrl: l.imageUrl,
           imageData: l.imageData,
+          children: l.children,
           // 标记这个图层是否可编辑（根据公共图层列表）
           editable: commonEditableLayers.some(
             cl => cl.key === getLayerKey(l) && cl.editable
