@@ -697,7 +697,10 @@ export class LayerStyleService {
     }
 
     // 读取单通道 alpha 的 raw 数据
+    // 注意：sharp 从 PNG 解码单通道灰度图时默认转成 3 通道 sRGB
+    // 必须用 toColorspace('b-w') 强制单通道，否则像素索引完全错乱
     const { data: srcData, info } = await sharp(alphaBuffer)
+      .toColorspace('b-w')
       .raw()
       .toBuffer({ resolveWithObject: true });
     const srcW = info.width;
@@ -748,7 +751,10 @@ export class LayerStyleService {
     }
 
     // 读取单通道 alpha 的 raw 数据
+    // 注意：sharp 从 PNG 解码单通道灰度图时默认转成 3 通道 sRGB
+    // 必须用 toColorspace('b-w') 强制单通道，否则像素索引完全错乱
     const { data: srcData, info } = await sharp(alphaBuffer)
+      .toColorspace('b-w')
       .raw()
       .toBuffer({ resolveWithObject: true });
     const srcW = info.width;
