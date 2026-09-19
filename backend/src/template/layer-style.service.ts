@@ -241,10 +241,11 @@ export class LayerStyleService {
    * 应用投影
    * 原理：
    * 1. 提取图层 alpha 通道作为影子形状
-   * 2. 填充影子颜色
-   * 3. 高斯模糊
-   * 4. 按角度和距离偏移
-   * 5. 放到图层下面，按 blendMode 混合
+   * 2. 先膨胀 spread（实边部分）
+   * 3. 对 alpha 做高斯模糊（只模糊透明度，颜色不被稀释）
+   * 4. 用模糊后的 alpha 填充影子颜色
+   * 5. 按角度和距离偏移
+   * 6. 放到图层下面，按 blendMode 混合
    */
   private async applyDropShadow(
     buffer: Buffer,
@@ -267,30 +268,32 @@ export class LayerStyleService {
       if (!w || !h) return { buffer, offsetX: 0, offsetY: 0, width: w, height: h };
 
       // 计算偏移量（PS 角度：0° 向上为正，顺时针转）
-      const angleRad = (90 - shadow.angle) * Math.PI / 180;
+      // 影子位置 = 光源方向的反方向，即 angle + 180°
+      const angleRad = (270 - shadow.angle) * Math.PI / 180;
       const offsetX = Math.round(Math.cos(angleRad) * shadow.distance);
-      const offsetY = -Math.round(Math.sin(angleRad) * shadow.distance);
+      const offsetY = Math.round(Math.sin(angleRad) * shadow.distance);
 
-      // spread 扩展的像素量
+      // spread 百分比 → 像素
       const spreadAmount = (shadow.spread || 0) / 100;
       const spreadPx = spreadAmount > 0 && shadow.size > 0
         ? Math.max(1, Math.round(shadow.size * spreadAmount))
         : 0;
 
-      // 模糊半径
+      // 模糊半径：PS 的 size ≈ 2 * sigma * 3（高斯模糊 3sigma 外几乎为0）
+      // 经测算：sigma ≈ size / 6 时和 PS 效果最接近
+      // blurSize 是 size 减去 spread 后的模糊部分
       const blurSize = shadow.size * (1 - spreadAmount);
-      const blurSigma = blurSize > 0 ? Math.max(0.1, blurSize / 2) : 0;
+      const blurSigma = blurSize > 0 ? Math.max(0.1, blurSize / 3.5) : 0;
 
       // 计算大画布尺寸（给膨胀、模糊、偏移留出空间）
-      const padLeft = Math.max(0, -offsetX) + spreadPx + Math.ceil(blurSigma * 3);
-      const padTop = Math.max(0, -offsetY) + spreadPx + Math.ceil(blurSigma * 3);
-      const padRight = Math.max(0, offsetX) + spreadPx + Math.ceil(blurSigma * 3);
-      const padBottom = Math.max(0, offsetY) + spreadPx + Math.ceil(blurSigma * 3);
+      const padLeft = Math.max(0, -offsetX) + spreadPx + Math.ceil(blurSigma * 4);
+      const padTop = Math.max(0, -offsetY) + spreadPx + Math.ceil(blurSigma * 4);
+      const padRight = Math.max(0, offsetX) + spreadPx + Math.ceil(blurSigma * 4);
+      const padBottom = Math.max(0, offsetY) + spreadPx + Math.ceil(blurSigma * 4);
       const totalW = w + padLeft + padRight;
       const totalH = h + padTop + padBottom;
 
       // 步骤 1：把原图层 alpha 放到大画布中央（单通道）
-      // 先创建全透明的大画布 alpha（全 0）
       const bigAlphaRGBA = await sharp({
         create: { width: totalW, height: totalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
       }).png().toBuffer();
@@ -300,39 +303,39 @@ export class LayerStyleService {
         .png()
         .toBuffer();
 
-      const bigAlpha = await sharp(layerOnBig).extractChannel('alpha').png().toBuffer();
+      // 提取 alpha 通道（单通道灰度图）
+      let alphaMask = await sharp(layerOnBig).extractChannel('alpha').png().toBuffer();
 
-      // 步骤 2：膨胀 spread（在大画布上膨胀，才有空间向外扩）
-      let shadowMask: Buffer;
+      // 步骤 2：膨胀 spread（实边扩展）
       if (spreadPx > 0) {
-        // dilateAlpha 返回 RGBA 遮罩
-        const dilatedRGBA = await this.dilateAlpha(bigAlpha, totalW, totalH, spreadPx);
-        shadowMask = dilatedRGBA;
-      } else {
-        shadowMask = await this.alphaToMask(bigAlpha, totalW, totalH);
+        const dilated = await this.dilateAlpha(alphaMask, totalW, totalH, spreadPx);
+        // 膨胀后是 RGBA，重新提取 alpha
+        alphaMask = await sharp(dilated).extractChannel('alpha').png().toBuffer();
       }
 
-      // 步骤 3：填充投影颜色
-      const shadowColor = this.parseColorToRgba(shadow.color, shadow.opacity);
-      let shadowShape = await sharp({
-        create: { width: totalW, height: totalH, channels: 4, background: shadowColor },
-      })
-        .composite([{ input: shadowMask, blend: 'dest-in' }])
-        .png()
-        .toBuffer();
-
-      // 步骤 4：高斯模糊
+      // 步骤 3：对 alpha 做高斯模糊（只模糊透明度遮罩，颜色后面再填）
       if (blurSigma > 0) {
-        shadowShape = await sharp(shadowShape)
+        alphaMask = await sharp(alphaMask)
           .blur(blurSigma)
           .png()
           .toBuffer();
       }
 
-      // 步骤 5：偏移投影（通过裁剪来移动）
-      // 投影向右下偏移 offsetX/offsetY，相当于图像内容向右下移动
-      // 我们需要从 shadowShape 中裁剪出偏移后的区域，放到正确位置
-      // 更简单的方法：再创建一个大画布，把投影放到偏移位置
+      // 步骤 4：用模糊后的 alpha 遮罩填充投影颜色
+      // 关键：先创建纯色图，再用 alpha 做 dest-in 遮罩
+      // 这样颜色不会被模糊稀释，边缘透明度由 alpha 控制
+      const shadowColor = this.parseColorToRgba(shadow.color, shadow.opacity);
+      let shadowShape = await sharp({
+        create: { width: totalW, height: totalH, channels: 4, background: shadowColor },
+      })
+        .composite([{
+          input: alphaMask,
+          blend: 'dest-in',
+        }])
+        .png()
+        .toBuffer();
+
+      // 步骤 5：偏移投影（放到正确位置）
       const shadowX = offsetX;
       const shadowY = offsetY;
       const shadowOnCanvas = await sharp({
@@ -366,7 +369,7 @@ export class LayerStyleService {
    * 应用内阴影
    * 原理：和投影类似，但阴影是在图层内部
    * 1. 反转 alpha（阴影在内容边缘内部）
-   * 2. 偏移 + 模糊
+   * 2. 偏移 + 模糊（先模糊 alpha 再填色）
    * 3. 用图层 alpha 做遮罩（只显示内容内部的阴影）
    */
   private async applyInnerShadow(
@@ -389,50 +392,60 @@ export class LayerStyleService {
       const h = meta.height || layerH;
       if (!w || !h) return buffer;
 
-      // 计算偏移（和投影相反，内阴影的偏移方向是反向的）
+      // 计算偏移（内阴影的偏移方向和投影相反，因为阴影在内部）
+      // 光源从 angle 方向照来，内阴影出现在光源对侧的内部边缘
       const angleRad = (90 - shadow.angle) * Math.PI / 180;
-      const offsetX = -Math.round(Math.cos(angleRad) * shadow.distance);
-      const offsetY = Math.round(Math.sin(angleRad) * shadow.distance);
+      const offsetX = Math.round(Math.cos(angleRad) * shadow.distance);
+      const offsetY = -Math.round(Math.sin(angleRad) * shadow.distance);
 
-      const blurSigma = shadow.size > 0 ? Math.max(0.1, shadow.size / 2) : 0;
+      const blurSigma = shadow.size > 0 ? Math.max(0.1, shadow.size / 3.5) : 0;
 
-      // 提取 alpha，转成 RGBA 遮罩
+      // choke 收缩百分比 → 像素
+      const chokeAmount = (shadow.choke || 0) / 100;
+      const chokePx = chokeAmount > 0 && shadow.size > 0
+        ? Math.max(1, Math.round(shadow.size * chokeAmount))
+        : 0;
+
+      // 提取 alpha 通道
       const alphaBuffer = await sharp(buffer).extractChannel('alpha').png().toBuffer();
-      const alphaMask = await this.alphaToMask(alphaBuffer, w, h);
 
-      // 生成阴影颜色图（带 alpha 遮罩）
-      const shadowColor = this.parseColorToRgba(shadow.color, shadow.opacity);
-      let shadowShape = await sharp({
-        create: { width: w, height: h, channels: 4, background: shadowColor },
-      })
-        .composite([{ input: alphaMask, blend: 'dest-in' }])
-        .png()
-        .toBuffer();
-
-      // 模糊
-      if (blurSigma > 0) {
-        shadowShape = await sharp(shadowShape).blur(blurSigma).png().toBuffer();
+      // 先做 choke（向内收缩 alpha，相当于内阴影的 spread）
+      let shadowAlpha = alphaBuffer;
+      if (chokePx > 0) {
+        // erodeAlpha 是向内侵蚀，返回 RGBA
+        const eroded = await this.erodeAlpha(alphaBuffer, w, h, chokePx);
+        shadowAlpha = await sharp(eroded).extractChannel('alpha').png().toBuffer();
       }
 
-      // 偏移（内阴影是把阴影图向反方向偏移，然后用图层 alpha 做遮罩，只保留内部部分）
-      const padX = Math.abs(offsetX) + Math.ceil(blurSigma * 3);
-      const padY = Math.abs(offsetY) + Math.ceil(blurSigma * 3);
+      // 对 alpha 做模糊（先模糊透明度遮罩）
+      if (blurSigma > 0) {
+        shadowAlpha = await sharp(shadowAlpha)
+          .blur(blurSigma)
+          .png()
+          .toBuffer();
+      }
+
+      // 偏移阴影（向 offset 方向移动，然后用原 alpha 做遮罩取内部部分）
+      const padX = Math.abs(offsetX) + Math.ceil(blurSigma * 4);
+      const padY = Math.abs(offsetY) + Math.ceil(blurSigma * 4);
       const totalW = w + padX * 2;
       const totalH = h + padY * 2;
 
-      // 大画布放偏移后的阴影
+      // 大画布放偏移后的阴影 alpha
       let shadowOnCanvas = await sharp({
         create: {
           width: totalW,
           height: totalH,
-          channels: 4,
+          channels: 1,
           background: { r: 0, g: 0, b: 0, alpha: 0 },
         },
       }).png().toBuffer();
 
+      // 把阴影 alpha 放到偏移位置
+      // 内阴影：偏移方向和光源方向相同（阴影出现在光源对侧）
       shadowOnCanvas = await sharp(shadowOnCanvas)
         .composite([{
-          input: shadowShape,
+          input: shadowAlpha,
           left: padX + offsetX,
           top: padY + offsetY,
         }])
@@ -440,14 +453,26 @@ export class LayerStyleService {
         .toBuffer();
 
       // 裁剪回原尺寸（中心部分 = 原图层区域）
-      const croppedShadow = await sharp(shadowOnCanvas)
+      const croppedShadowAlpha = await sharp(shadowOnCanvas)
         .extract({ left: padX, top: padY, width: w, height: h })
         .png()
         .toBuffer();
 
+      // 生成阴影颜色（用模糊后的 alpha 做遮罩填色）
+      const shadowColor = this.parseColorToRgba(shadow.color, shadow.opacity);
+      let innerShadowShape = await sharp({
+        create: { width: w, height: h, channels: 4, background: shadowColor },
+      })
+        .composite([{
+          input: croppedShadowAlpha,
+          blend: 'dest-in',
+        }])
+        .png()
+        .toBuffer();
+
       // 用图层 alpha 做遮罩（只保留图层内部的阴影）
-      // 用 dest-in：阴影 * 图层 alpha = 只有图层内部有阴影
-      const innerShadow = await sharp(croppedShadow)
+      // dest-in = 颜色 * 图层 alpha = 只有图层内部有阴影
+      const innerShadow = await sharp(innerShadowShape)
         .composite([{ input: buffer, blend: 'dest-in' }])
         .png()
         .toBuffer();
@@ -590,6 +615,12 @@ export class LayerStyleService {
 
   /**
    * 应用外发光
+   * 原理：
+   * 1. 提取图层 alpha 通道
+   * 2. 膨胀 spread（实边扩展）
+   * 3. 对 alpha 做高斯模糊
+   * 4. 用模糊后的 alpha 填充发光颜色
+   * 5. 把发光图放在图层下面
    */
   private async applyOuterGlow(
     buffer: Buffer,
@@ -603,17 +634,84 @@ export class LayerStyleService {
     layerW: number,
     layerH: number,
   ): Promise<{ buffer: Buffer; offsetX: number; offsetY: number; width: number; height: number }> {
-    // 外发光 ≈ 0 角度、0 距离的投影（均匀向外）
-    return this.applyDropShadow(
-      buffer,
-      {
-        ...glow,
-        angle: 0,
-        distance: 0,
-      },
-      layerW,
-      layerH,
-    );
+    try {
+      const meta = await sharp(buffer).metadata();
+      const w = meta.width || layerW;
+      const h = meta.height || layerH;
+      if (!w || !h) return { buffer, offsetX: 0, offsetY: 0, width: w, height: h };
+
+      // spread 百分比 → 像素
+      const spreadAmount = (glow.spread || 0) / 100;
+      const spreadPx = spreadAmount > 0 && glow.size > 0
+        ? Math.max(1, Math.round(glow.size * spreadAmount))
+        : 0;
+
+      // 模糊半径：PS 中 size 是模糊范围（约 2 * sigma * 2.5）
+      // sigma 越大，发光越散
+      const blurSize = glow.size * (1 - spreadAmount);
+      const blurSigma = blurSize > 0 ? Math.max(0.1, blurSize / 3) : 0;
+
+      // 四周扩展的 padding
+      const pad = spreadPx + Math.ceil(blurSigma * 3.5);
+      const totalW = w + pad * 2;
+      const totalH = h + pad * 2;
+
+      // 步骤 1：把图层 alpha 放到大画布中央
+      const bigCanvas = await sharp({
+        create: { width: totalW, height: totalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+      }).png().toBuffer();
+
+      const layerOnBig = await sharp(bigCanvas)
+        .composite([{ input: buffer, left: pad, top: pad }])
+        .png()
+        .toBuffer();
+
+      // 提取 alpha 通道
+      let alphaMask = await sharp(layerOnBig).extractChannel('alpha').png().toBuffer();
+
+      // 步骤 2：膨胀 spread
+      if (spreadPx > 0) {
+        const dilated = await this.dilateAlpha(alphaMask, totalW, totalH, spreadPx);
+        alphaMask = await sharp(dilated).extractChannel('alpha').png().toBuffer();
+      }
+
+      // 步骤 3：对 alpha 做高斯模糊（只模糊透明度）
+      if (blurSigma > 0) {
+        alphaMask = await sharp(alphaMask)
+          .blur(blurSigma)
+          .png()
+          .toBuffer();
+      }
+
+      // 步骤 4：用模糊后的 alpha 填充发光颜色
+      const glowColor = this.parseColorToRgba(glow.color, glow.opacity);
+      const glowShape = await sharp({
+        create: { width: totalW, height: totalH, channels: 4, background: glowColor },
+      })
+        .composite([{
+          input: alphaMask,
+          blend: 'dest-in',
+        }])
+        .png()
+        .toBuffer();
+
+      // 步骤 5：把原图层放在发光上面
+      const result = await sharp(glowShape)
+        .composite([{ input: buffer, left: pad, top: pad }])
+        .png()
+        .toBuffer();
+
+      return {
+        buffer: result,
+        offsetX: -pad,
+        offsetY: -pad,
+        width: totalW,
+        height: totalH,
+      };
+    } catch (e) {
+      debugLog('外发光失败:', e.message);
+      return { buffer, offsetX: 0, offsetY: 0, width: layerW, height: layerH };
+    }
   }
 
   /**
